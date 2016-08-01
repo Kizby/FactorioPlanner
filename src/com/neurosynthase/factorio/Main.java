@@ -18,21 +18,193 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
-    public static Map<String, Resource> resources = new HashMap<>();
-    public static Map<String, Crafter> crafters = new HashMap<>();
-    public static Map<String, Recipe> recipes = new HashMap<>();
-    public static Map<String, Set<Recipe>> resultRecipeMap = new HashMap<>();
-    public static List<String> unlockedRecipes = new ArrayList<>();
-    public static Map<String, Technology> technologies = new HashMap<>();
+    public static Map<String, Resource> resources = new TreeMap<>();
+    public static Map<String, Crafter> crafters = new TreeMap<>();
+    public static Map<String, Recipe> recipes = new TreeMap<>();
+    public static Map<String, Set<Recipe>> resultRecipeMap = new TreeMap<>();
+    public static Set<String> unlockedRecipes = new TreeSet<>();
+    public static Map<String, Technology> technologies = new TreeMap<>();
+    public static Map<String, Technology> recipeTechnologyMap = new TreeMap<>();
+    private static Set<String> intermediateGoals = new TreeSet<>();
 
     public static void main(String[] args) {
         Map<Object, Object> data = GetData();
         parseData(data);
 
-        technologies.size();
+        Map<String, Number> inventory = new TreeMap<>();
+        inventory.put("player", 1); // why not?
+        inventory.put("burner-mining-drill", 1);
+        inventory.put("stone-furnace", 1);
+        inventory.put("pistol", 1);
+        inventory.put("firearm-magazine", 10);
+        inventory.put("iron-plate", 8);
+
+        Set<Technology> unlockedTechnologies = new TreeSet<>();
+
+        Map<String, Number> goal = new TreeMap<>();
+        goal.put("iron-axe", 1);
+        goal.put("science-pack-1", 30);
+
+        List<Step> steps = new ArrayList<>();
+        if (solve(inventory, unlockedTechnologies, goal, steps)) {
+            System.out.println(String.join("\n", steps.stream().map(Step::toString).collect(Collectors.toList())));
+        } else {
+            System.out.println("Impossible!");
+        }
+    }
+
+    private static boolean solve(Map<String, Number> inventory, Set<Technology> unlockedTechnologies, Map<String, Number> goal, List<Step> stepsSoFar) {
+        for (Map.Entry<String, Number> entry : goal.entrySet()) {
+            String item = entry.getKey();
+            double need = entry.getValue().doubleValue();
+            double have = 0.0;
+            if (inventory.containsKey(item)) {
+                have = inventory.get(item).doubleValue();
+            }
+            if (have >= need) {
+                // We're good!
+                continue;
+            }
+            need -= have;
+            if (resources.containsKey(item)) {
+                Resource resource = resources.get(item);
+                boolean haveMiner = false;
+                for (String miner : resource.miningTimes.keySet()) {
+                    if (inventory.containsKey(miner) && inventory.get(miner).intValue() > 0) {
+                        haveMiner = true;
+                        break;
+                    }
+                }
+                if (!haveMiner) {
+                    // Need to make something to obtain it!
+                    for (String miner : resource.miningTimes.keySet()) {
+                        if (intermediateGoals.contains(miner)) {
+                            // Already working on this, so it won't help!
+                            continue;
+                        }
+                        intermediateGoals.add(miner);
+
+                        Map<String, Number> newGoal = new TreeMap<>();
+                        newGoal.put(miner, 1);
+                        if (solve(inventory, unlockedTechnologies, newGoal, stepsSoFar)) {
+                            // Got it!
+                            haveMiner = true;
+                        }
+
+                        intermediateGoals.remove(miner);
+                        if (haveMiner) {
+                            break;
+                        }
+                    }
+                    if (!haveMiner) {
+                        // Uh oh! Guess this is impossible...
+                        return false;
+                    }
+                }
+                stepsSoFar.add(new Step(resources.get(item), need));
+                if (inventory.containsKey(item)) {
+                    inventory.put(item, inventory.get(item).doubleValue() + need);
+                } else {
+                    inventory.put(item, need);
+                }
+                return solve(inventory, unlockedTechnologies, goal, stepsSoFar);
+            }
+            if (resultRecipeMap.containsKey(item)) {
+                Set<Recipe> candidateRecipes = resultRecipeMap.get(item);
+                // First pass to see if any are immediately viable
+                for (Recipe recipe : candidateRecipes) {
+                    if (!unlockedRecipes.contains(recipe.name) && !unlockedTechnologies.contains(recipeTechnologyMap.get(recipe.name))) {
+                        // Not unlocked
+                        continue;
+                    }
+
+                    boolean haveCrafter = false;
+                    for (Crafter crafter : crafters.values()) {
+                        if (!inventory.containsKey(crafter.name)) {
+                            continue;
+                        }
+                        if (crafter.categories.contains(recipe.category)) {
+                            // We can craft it!
+                            haveCrafter = true;
+                        }
+                    }
+                    if (!haveCrafter) {
+                        // Need to make something to obtain it!
+                        for (Crafter crafter : crafters.values()) {
+                            if (!crafter.categories.contains(recipe.category)) {
+                                // Not relevant
+                                continue;
+                            }
+                            if (intermediateGoals.contains(crafter.name)) {
+                                // Already working on this, so it won't help!
+                                continue;
+                            }
+                            intermediateGoals.add(crafter.name);
+
+                            Map<String, Number> newGoal = new TreeMap<>();
+                            newGoal.put(crafter.name, 1);
+                            if (solve(inventory, unlockedTechnologies, newGoal, stepsSoFar)) {
+                                // Got it!
+                                haveCrafter = true;
+                            }
+
+                            intermediateGoals.remove(crafter.name);
+                            if (haveCrafter) {
+                                break;
+                            }
+                        }
+                        if (!haveCrafter) {
+                            // Uh oh! Guess this is impossible...
+                            return false;
+                        }
+                    }
+                    int count = (int) Math.ceil(need / recipe.results.get(item).doubleValue());
+
+                    Map<String, Number> newGoal = new TreeMap<>();
+                    for (Map.Entry<String, Number> ingredientEntry : recipe.ingredients.entrySet()) {
+                        newGoal.put(ingredientEntry.getKey(), ingredientEntry.getValue().doubleValue() * count);
+                    }
+                    if (!solve(inventory, unlockedTechnologies, newGoal, stepsSoFar)) {
+                        // This recipe won't help us... (might have wasted making a crafter, oh well)
+                        continue;
+                    }
+
+                    stepsSoFar.add(new Step(recipe, count));
+                    for (Map.Entry<String, Number> madeEntry : newGoal.entrySet()) {
+                        double remaining = inventory.get(madeEntry.getKey()).doubleValue();
+                        remaining -= madeEntry.getValue().doubleValue();
+                        if (0 == remaining) {
+                            inventory.remove(madeEntry.getKey());
+                        } else {
+                            inventory.put(madeEntry.getKey(), remaining);
+                        }
+                    }
+                    for (Map.Entry<String, Number> resultEntry : recipe.results.entrySet()) {
+                        if (inventory.containsKey(resultEntry.getKey())) {
+                            inventory.put(resultEntry.getKey(), inventory.get(resultEntry.getKey()).doubleValue() + resultEntry.getValue().doubleValue() * count);
+                        } else {
+                            inventory.put(item, resultEntry.getValue().doubleValue() * count);
+                        }
+                    }
+                    return solve(inventory, unlockedTechnologies, goal, stepsSoFar);
+                }
+                // Might need a new tech!
+                Set<Technology> candidateTechnologies = new TreeSet<>();
+                for (Recipe recipe : candidateRecipes) {
+                    candidateTechnologies.add(recipeTechnologyMap.get(recipe.name));
+                }
+
+            }
+            return false; // Can't mine or craft it!
+        }
+        // Have everything we need!
+        return true;
     }
 
     @SuppressWarnings("unchecked")
@@ -45,7 +217,8 @@ public class Main {
         ParseResources(playerMap, resourceMap, miningDrillMap);
 
         Map<String, Map<String, Object>> assemblingMachineMap = (Map<String, Map<String, Object>>) data.get("assembling-machine");
-        ParseCrafters(playerMap, assemblingMachineMap);
+        Map<String, Map<String, Object>> furnaceMap = (Map<String, Map<String, Object>>) data.get("furnace");
+        ParseCrafters(playerMap, assemblingMachineMap, furnaceMap);
 
         Map<String, Map<String, Object>> recipeMap = (Map<String, Map<String, Object>>) data.get("recipe");
         ParseRecipes(recipeMap);
@@ -85,6 +258,11 @@ public class Main {
                 switch (type) {
                     case "unlock-recipe":
                         technology.recipesUnlocked.add((String) effect.get("recipe"));
+                        recipeTechnologyMap.put((String) effect.get("recipe"), technology);
+                        if (unlockedRecipes.contains(effect.get("recipe"))) {
+                            // wtf!?
+                            System.err.println("Recipe " + effect.get("recipe") + " is enabled, but unlocked by technology " + name + "!?");
+                        }
                         break;
                     case "laboratory-speed":
                         technology.modifiers.put(type, (Number) effect.get("modifier"));
@@ -92,19 +270,19 @@ public class Main {
                     default:
                         System.err.println("Do we care about " + type + "?");
                         //fall-through
-                    case "maximum-following-robots-count":
-                    case "worker-robot-speed":
-                    case "worker-robot-storage":
-                    case "turret-attack":
-                    case "ghost-time-to-live":
-                    case "stack-inserter-capacity-bonus":
-                    case "inserter-stack-size-bonus":
                     case "ammo-damage":
+                    case "auto-character-logistic-trash-slots":
                     case "character-logistic-slots":
                     case "character-logistic-trash-slots":
-                    case "auto-character-logistic-trash-slots":
+                    case "ghost-time-to-live":
                     case "gun-speed":
+                    case "inserter-stack-size-bonus":
+                    case "maximum-following-robots-count":
                     case "num-quick-bars":
+                    case "stack-inserter-capacity-bonus":
+                    case "turret-attack":
+                    case "worker-robot-speed":
+                    case "worker-robot-storage":
                         // don't care
                         break;
                 }
@@ -161,7 +339,7 @@ public class Main {
             for (Map.Entry<String, Number> resultEntry : recipe.results.entrySet()) {
                 Set<Recipe> recipeSet = resultRecipeMap.get(resultEntry.getKey());
                 if (null == recipeSet) {
-                    recipeSet = new HashSet<>();
+                    recipeSet = new TreeSet<>();
                     resultRecipeMap.put(resultEntry.getKey(), recipeSet);
                 }
                 recipeSet.add(recipe);
@@ -239,10 +417,14 @@ public class Main {
                 resource.miningTimes.put(drillName, resource.baseMiningTime / baseSpeed);
             }
         }
+
+        // Fake water to make everything else cleaner
+        Resource water = new Resource("water", "water", 1);
+        water.miningTimes.put("offshore-pump", 1.0);
     }
 
     @SuppressWarnings("unchecked")
-    private static void ParseCrafters(Map<String, Object> playerMap, Map<String, Map<String, Object>> assemblingMachineMap) {
+    private static void ParseCrafters(Map<String, Object> playerMap, Map<String, Map<String, Object>> assemblingMachineMap, Map<String, Map<String, Object>> furnaceMap) {
         Crafter player = new Crafter("player", 1000, 1);
         player.categories.addAll((List<String>) playerMap.get("crafting_categories"));
         crafters.put("player", player);
@@ -252,6 +434,15 @@ public class Main {
             int ingredientCount = ((Number) entry.getValue().get("ingredient_count")).intValue();
             double craftingSpeed = ((Number) entry.getValue().get("crafting_speed")).doubleValue();
             Crafter machine = new Crafter(name, ingredientCount, craftingSpeed);
+
+            machine.categories.addAll((List<String>) entry.getValue().get("crafting_categories"));
+            crafters.put(name, machine);
+        }
+
+        for (Map.Entry<String, Map<String, Object>> entry : furnaceMap.entrySet()) {
+            String name = entry.getKey();
+            double craftingSpeed = ((Number) entry.getValue().get("crafting_speed")).doubleValue();
+            Crafter machine = new Crafter(name, 1, craftingSpeed);
 
             machine.categories.addAll((List<String>) entry.getValue().get("crafting_categories"));
             crafters.put(name, machine);
@@ -375,6 +566,49 @@ public class Main {
         }
     }
 
+    public static class Step {
+        public final Type type;
+        Technology technology = null;
+        Recipe recipe = null;
+        int craftCount = 0;
+        Resource resource = null;
+        double resourceCount = 0;
+
+        public Step(Recipe recipe, int craftCount) {
+            this.type = Type.RECIPE;
+            this.recipe = recipe;
+            this.craftCount = craftCount;
+        }
+
+        public Step(Technology technology) {
+            this.type = Type.TECHNOLOGY;
+            this.technology = technology;
+        }
+
+        public Step(Resource resource, double resourceCount) {
+            this.type = Type.RESOURCE;
+            this.resource = resource;
+            this.resourceCount = resourceCount;
+        }
+
+        public String toString() {
+            switch (type) {
+                case TECHNOLOGY:
+                    return "Research " + technology.name;
+                case RECIPE:
+                    return "Craft " + recipe.name + " " + craftCount + " times";
+                case RESOURCE:
+                    return "Mine or pump " + resourceCount + " " + resource.name;
+                default:
+                    return "wtf!? Error'd step...";
+            }
+        }
+
+        public enum Type {
+            TECHNOLOGY, RECIPE, RESOURCE
+        }
+    }
+
     public static class Resource {
         public String name;
         public String category;
@@ -403,7 +637,7 @@ public class Main {
         }
     }
 
-    public static class Recipe {
+    public static class Recipe implements Comparable<Recipe> {
         public String name;
         public String category;
         public double craftingTime;
@@ -416,6 +650,11 @@ public class Main {
             this.craftingTime = craftingTime;
             ingredients = new HashMap<>();
             results = new HashMap<>();
+        }
+
+        @Override
+        public int compareTo(Recipe o) {
+            return name.compareTo(o.name);
         }
     }
 
