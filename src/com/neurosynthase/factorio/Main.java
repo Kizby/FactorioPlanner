@@ -27,7 +27,10 @@ import java.util.stream.Stream;
 public class Main {
     public static Map<String, Resource> resources = new TreeMap<>();
     public static Map<String, Crafter> crafters = new TreeMap<>();
+    public static Map<String, Integer> moduleSlots = new TreeMap<>();
     public static Map<String, Recipe> recipes = new TreeMap<>();
+    public static Map<String, Module> modules = new TreeMap<>();
+    public static Map<String, String> subgroups = new TreeMap<>();
     public static Map<String, Set<Recipe>> resultRecipeMap = new TreeMap<>();
     public static Set<String> unlockedRecipes = new TreeSet<>();
     public static Map<String, Technology> technologies = new TreeMap<>();
@@ -62,36 +65,36 @@ public class Main {
     }
 
     private static void collapse(List<Step> steps) {
-        Map<Step.Type, Set<String>> done = new TreeMap<>();
-        done.put(Step.Type.RESOURCE, new TreeSet<>());
-        done.put(Step.Type.RECIPE, new TreeSet<>());
-        done.put(Step.Type.TECHNOLOGY, new TreeSet<>());
+        Map<Class<? extends Step>, Set<String>> done = new HashMap<>();
+        done.put(MineStep.class, new TreeSet<>());
+        done.put(CraftStep.class, new TreeSet<>());
+        done.put(ResearchStep.class, new TreeSet<>());
         boolean changed = true;
         while (changed) {
             changed = false;
             ListIterator<Step> iterator = steps.listIterator();
             while (iterator.hasNext()) {
                 Step base = iterator.next();
-                if (done.get(base.type).contains(base.name)) {
+                if (done.get(base.getClass()).contains(base.name)) {
                     continue;
                 }
-                done.get(base.type).add(base.name);
+                done.get(base.getClass()).add(base.name);
                 changed = true;
                 while (iterator.hasNext()) {
                     Step next = iterator.next();
-                    if (next.type != base.type || !next.name.equals(base.name)) {
+                    if (next.getClass() != base.getClass() || !next.name.equals(base.name)) {
                         continue;
                     }
                     // Found something to glom on!
-                    switch (base.type) {
-                        case RESOURCE:
-                        base.resourceCount += next.resourceCount;
-                        break;
-                        case RECIPE:
-                        base.craftCount += next.craftCount;
-                        break;
-                        case TECHNOLOGY:
+                    if (base instanceof MineStep) {
+                        ((MineStep)base).resourceCount += ((MineStep)next).resourceCount;
+                    } else if (base instanceof CraftStep) {
+                        ((CraftStep)base).craftCount += ((CraftStep)next).craftCount;
+                    } else if (base instanceof ResearchStep) {
                         // wtf!? Researched the same tech multiple times?
+                        continue;
+                    } else {
+                        System.err.println("Need to add collapse logic for new Step kind " + base.getClass().getCanonicalName());
                         continue;
                     }
                     iterator.remove();
@@ -146,14 +149,14 @@ public class Main {
             need -= have;
             if (resources.containsKey(item)) {
                 Resource resource = resources.get(item);
-                boolean haveMiner = false;
+                String minerToUse = null;
                 for (String miner : resource.miningTimes.keySet()) {
                     if (inventory.containsKey(miner) && inventory.get(miner).intValue() > 0) {
-                        haveMiner = true;
+                        minerToUse = miner;
                         break;
                     }
                 }
-                if (!haveMiner) {
+                if (null == minerToUse) {
                     // Need to make something to obtain it!
                     for (String miner : resource.miningTimes.keySet()) {
                         if (intermediateGoals.contains(miner)) {
@@ -166,21 +169,21 @@ public class Main {
                         newGoal.put(miner, 1);
                         if (solve(inventory, unlockedTechnologies, newGoal, stepsSoFar)) {
                             // Got it!
-                            haveMiner = true;
+                            minerToUse = miner;
                         }
 
                         intermediateGoals.remove(miner);
-                        if (haveMiner) {
+                        if (null != minerToUse) {
                             break;
                         }
                     }
-                    if (!haveMiner) {
+                    if (null == minerToUse) {
                         // Uh oh! Guess this is impossible...
                         return false;
                     }
                 }
 
-                stepsSoFar.add(new Step(resources.get(item), need));
+                stepsSoFar.add(new MineStep(resources.get(item), need, minerToUse, new ArrayList<>()));
                 add(inventory, item, need);
 
                 return solve(inventory, unlockedTechnologies, goal, stepsSoFar);
@@ -196,18 +199,18 @@ public class Main {
                             continue;
                         }
 
-                        boolean haveCrafter = false;
+                        String crafterToUse = null;
                         for (Crafter crafter : crafters.values()) {
                             if (!inventory.containsKey(crafter.name)) {
                                 continue;
                             }
                             if (crafter.categories.contains(recipe.category)) {
                                 // We can craft it!
-                                haveCrafter = true;
+                                crafterToUse = crafter.name;
                                 break;
                             }
                         }
-                        if (!haveCrafter) {
+                        if (null == crafterToUse) {
                             if (!craftAsNecessary) {
                                 continue;
                             }
@@ -227,15 +230,15 @@ public class Main {
                                 newGoal.put(crafter.name, 1);
                                 if (solve(inventory, unlockedTechnologies, newGoal, stepsSoFar)) {
                                     // Got it!
-                                    haveCrafter = true;
+                                    crafterToUse = crafter.name;
                                 }
 
                                 intermediateGoals.remove(crafter.name);
-                                if (haveCrafter) {
+                                if (null != crafterToUse) {
                                     break;
                                 }
                             }
-                            if (!haveCrafter) {
+                            if (null == crafterToUse) {
                                 // Uh oh! Guess this is impossible...
                                 return false;
                             }
@@ -261,7 +264,7 @@ public class Main {
                             continue;
                         }
 
-                        stepsSoFar.add(new Step(recipe, count));
+                        stepsSoFar.add(new CraftStep(recipe, count, crafterToUse, new ArrayList<>()));
                         for (Map.Entry<String, Number> madeEntry : recipe.ingredients.entrySet()) {
                             subtract(inventory, madeEntry.getKey(), madeEntry.getValue().doubleValue() * count);
                         }
@@ -368,7 +371,7 @@ public class Main {
             subtract(inventory, entry.getKey(), entry.getValue());
         }
         unlockedTechnologies.add(technology);
-        stepsSoFar.add(new Step(technology));
+        stepsSoFar.add(new ResearchStep(technology, new ArrayList<>()));
         return true;
     }
 
@@ -386,11 +389,65 @@ public class Main {
         Map<String, Map<String, Object>> rocketSiloMap = (Map<String, Map<String, Object>>) data.get("rocket-silo");
         ParseCrafters(playerMap, assemblingMachineMap, furnaceMap, rocketSiloMap);
 
+        Map<String, Map<String, Object>> labMap = (Map<String, Map<String, Object>>) data.get("lab");
+        ParseLabs(labMap);
+
         Map<String, Map<String, Object>> recipeMap = (Map<String, Map<String, Object>>) data.get("recipe");
         ParseRecipes(recipeMap);
 
         Map<String, Map<String, Object>> technologyMap = (Map<String, Map<String, Object>>) data.get("technology");
         ParseTechnologies(technologyMap);
+
+        Map<String, Map<String, Object>> itemMap = (Map<String, Map<String, Object>>) data.get("item");
+        ParseItems(itemMap);
+
+        Map<String, Map<String, Object>> moduleMap = (Map<String, Map<String, Object>>) data.get("module");
+        ParseModules(moduleMap);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void ParseLabs(Map<String, Map<String, Object>> labMap) {
+        for (Map.Entry<String, Map<String, Object>> entry : labMap.entrySet()) {
+            String name = entry.getKey();
+
+            Object moduleSpec = entry.getValue().get("module_specification");
+            if (moduleSpec != null && moduleSpec instanceof Map) {
+                int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
+                moduleSlots.put(name, slotCount);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void ParseModules(Map<String, Map<String, Object>> moduleMap) {
+        for (Map.Entry<String, Map<String, Object>> entry : moduleMap.entrySet()) {
+            String name = entry.getKey();
+            String subgroup = (String) entry.getValue().get("subgroup");
+            subgroups.put(name, subgroup); // Should always be "module", but may as well be explicit
+
+            Map<String, Map<String, Number>> effectMap = (Map<String, Map<String, Number>>) entry.getValue().get("effect");
+            Map<String, Double> effects = new TreeMap<>();
+            for (Map.Entry<String, Map<String, Number>> effectsEntry : effectMap.entrySet()) {
+                effects.put(effectsEntry.getKey(), effectsEntry.getValue().get("bonus").doubleValue());
+            }
+
+            List<String> limitationList = (List<String>) entry.getValue().get("limitation");
+            Set<String> limitations = null;
+            if (null != limitationList) {
+                limitations = new TreeSet<>(limitationList);
+            }
+            modules.put(name, new Module(name, effects, limitations));
+        }
+    }
+
+
+    @SuppressWarnings("unchecked")
+    private static void ParseItems(Map<String, Map<String, Object>> itemMap) {
+        for (Map.Entry<String, Map<String, Object>> entry : itemMap.entrySet()) {
+            String name = entry.getKey();
+            String subgroup = (String) entry.getValue().get("subgroup");
+            subgroups.put(name, subgroup);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -574,6 +631,11 @@ public class Main {
             if (drillMiningSpeed instanceof Number) {
                 miningSpeeds.put(entry.getKey(), ((Number) drillMiningSpeed).doubleValue());
             }
+            Object drillModuleSpec = entry.getValue().get("module_specification");
+            if (drillModuleSpec != null && drillModuleSpec instanceof Map) {
+                int slotCount = ((Map<String, Integer>)drillModuleSpec).get("module_slots");
+                moduleSlots.put(entry.getKey(), slotCount);
+            }
         }
 
         for (Map.Entry<String, Double> entry : miningSpeeds.entrySet()) {
@@ -619,6 +681,12 @@ public class Main {
 
             machine.categories.addAll((List<String>) entry.getValue().get("crafting_categories"));
             crafters.put(name, machine);
+
+            Object moduleSpec = entry.getValue().get("module_specification");
+            if (moduleSpec != null && moduleSpec instanceof Map) {
+                int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
+                moduleSlots.put(name, slotCount);
+            }
         }
 
         for (Map.Entry<String, Map<String, Object>> entry : furnaceMap.entrySet()) {
@@ -628,6 +696,12 @@ public class Main {
 
             machine.categories.addAll((List<String>) entry.getValue().get("crafting_categories"));
             crafters.put(name, machine);
+
+            Object moduleSpec = entry.getValue().get("module_specification");
+            if (moduleSpec != null && moduleSpec instanceof Map) {
+                int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
+                moduleSlots.put(name, slotCount);
+            }
         }
 
         for (Map.Entry<String, Map<String, Object>> entry : rocketSiloMap.entrySet()) {
@@ -637,6 +711,12 @@ public class Main {
 
             machine.categories.addAll((List<String>) entry.getValue().get("crafting_categories"));
             crafters.put(name, machine);
+
+            Object moduleSpec = entry.getValue().get("module_specification");
+            if (moduleSpec != null && moduleSpec instanceof Map) {
+                int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
+                moduleSlots.put(name, slotCount);
+            }
         }
     }
 
@@ -757,64 +837,75 @@ public class Main {
         }
     }
 
-    public static class Step extends NamedThing {
-        public final Type type;
-        Technology technology = null;
-        Recipe recipe = null;
-        int craftCount = 0;
-        Resource resource = null;
-        double resourceCount = 0;
+    public static abstract class Step extends NamedThing {
+        List<String> modules = null;
 
-        public Step(Recipe recipe, int craftCount) {
-            super(recipe.name);
-            this.type = Type.RECIPE;
-            this.recipe = recipe;
-            this.craftCount = craftCount;
+        protected Step(String name, List<String> modules) {
+            super(name);
+            this.modules = modules;
         }
 
-        public Step(Technology technology) {
-            super(technology.name);
-            this.type = Type.TECHNOLOGY;
+        public abstract String toString();
+    }
+
+    public static class ResearchStep extends Step {
+        Technology technology = null;
+
+        public ResearchStep(Technology technology, List<String> modules) {
+            super(technology.name, modules);
             this.technology = technology;
         }
-
-        public Step(Resource resource, double resourceCount) {
-            super(resource.name);
-            this.type = Type.RESOURCE;
-            this.resource = resource;
-            this.resourceCount = resourceCount;
-        }
-
         public String toString() {
-            switch (type) {
-                case TECHNOLOGY:
-                    return "Research " + technology.name;
-                case RECIPE:
-                    String result = "(";
-                    boolean bFirst = true;
-                    for (Map.Entry<String, Number> entry : recipe.results.entrySet()) {
-                        if (!bFirst) {
-                            result += ", ";
-                        } else {
-                            bFirst = false;
-                        }
-                        result += entry.getValue() + " " + entry.getKey() + (entry.getValue().doubleValue() != 1.0 ? "s" : "");
-                    }
-                    result += ")";
-                    return "Craft " + recipe.name + " " + result + " " + craftCount + " time" + (craftCount != 1 ? "s" : "");
-                case RESOURCE:
-                    return "Mine or pump " + resourceCount + " " + resource.name;
-                default:
-                    return "wtf!? Error'd step...";
-            }
-        }
-
-        public enum Type {
-            TECHNOLOGY, RECIPE, RESOURCE
+            return "Research " + technology.name;
         }
     }
 
-    public static class NamedThing implements Comparable<NamedThing> {
+    public static class CraftStep extends Step {
+        Recipe recipe = null;
+        int craftCount = 0;
+        String crafter = null;
+
+        public CraftStep(Recipe recipe, int craftCount, String crafter, List<String> modules) {
+            super(recipe.name, modules);
+            this.recipe = recipe;
+            this.craftCount = craftCount;
+            this.crafter = crafter;
+        }
+
+        public String toString() {
+            String result = "(";
+            boolean bFirst = true;
+            for (Map.Entry<String, Number> entry : recipe.results.entrySet()) {
+                if (!bFirst) {
+                    result += ", ";
+                } else {
+                    bFirst = false;
+                }
+                result += entry.getValue() + " " + entry.getKey() + (entry.getValue().doubleValue() != 1.0 ? "s" : "");
+            }
+            result += ")";
+            return "Craft " + recipe.name + " " + result + " " + craftCount + " time" + (craftCount != 1 ? "s" : "") + " with " + crafter;
+        }
+    }
+
+    public static class MineStep extends Step {
+        Resource resource = null;
+        double resourceCount = 0;
+        String miner = null;
+
+        public MineStep(Resource resource, double resourceCount, String miner, List<String> modules) {
+            super(resource.name, modules);
+            this.resource = resource;
+            this.resourceCount = resourceCount;
+            this.miner = miner;
+        }
+
+        public String toString() {
+            return "Mine or pump " + resourceCount + " " + resource.name + " with " + miner;
+        }
+    }
+
+    public static abstract class NamedThing implements Comparable<NamedThing> {
         public final String name;
 
         public NamedThing(String name) {
@@ -889,6 +980,17 @@ public class Main {
             prerequisites = new HashSet<>();
             recipesUnlocked = new HashSet<>();
             modifiers = new HashMap<>();
+        }
+    }
+
+    public static class Module extends NamedThing {
+        public Map<String, Double> effects;
+        public Set<String> limitations;
+
+        public Module(String name, Map<String, Double> effects, Set<String> limitations) {
+            super(name);
+            this.effects = effects;
+            this.limitations = limitations;
         }
     }
 }
