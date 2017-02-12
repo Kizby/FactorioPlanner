@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,6 +32,8 @@ public class Main {
     public static Map<String, Recipe> recipes = new TreeMap<>();
     public static Map<String, Module> modules = new TreeMap<>();
     public static Map<String, String> subgroups = new TreeMap<>();
+    public static Map<String, Double> fuels = new TreeMap<>();
+    public static Map<String, Double> powerUsages = new TreeMap<>();
     public static Map<String, Set<Recipe>> resultRecipeMap = new TreeMap<>();
     public static Set<String> unlockedRecipes = new TreeSet<>();
     public static Map<String, Technology> technologies = new TreeMap<>();
@@ -58,7 +61,10 @@ public class Main {
         List<Step> steps = new ArrayList<>();
         if (solve(inventory, unlockedTechnologies, goal, steps)) {
             collapse(steps);
-            System.out.println(String.join("\n", steps.stream().map(Step::toString).collect(Collectors.toList())));
+            System.out.println(String.join("\n", steps.stream()
+                    .map((Step step) -> step.toString() + " (" + step.getDuration() + ")")
+                    .collect(Collectors.toList())));
+            System.out.println("Total time: " + steps.stream().map(Step::getDuration).reduce(Duration.ZERO, Duration::plus));
         } else {
             System.out.println("Impossible!");
         }
@@ -183,7 +189,7 @@ public class Main {
                     }
                 }
 
-                stepsSoFar.add(new MineStep(resources.get(item), need, minerToUse, new ArrayList<>()));
+                stepsSoFar.add(new MineStep(resources.get(item), need, minerToUse, 1, new ArrayList<>()));
                 add(inventory, item, need);
 
                 return solve(inventory, unlockedTechnologies, goal, stepsSoFar);
@@ -264,7 +270,7 @@ public class Main {
                             continue;
                         }
 
-                        stepsSoFar.add(new CraftStep(recipe, count, crafterToUse, new ArrayList<>()));
+                        stepsSoFar.add(new CraftStep(recipe, count, crafterToUse, 1, new ArrayList<>()));
                         for (Map.Entry<String, Number> madeEntry : recipe.ingredients.entrySet()) {
                             subtract(inventory, madeEntry.getKey(), madeEntry.getValue().doubleValue() * count);
                         }
@@ -371,7 +377,7 @@ public class Main {
             subtract(inventory, entry.getKey(), entry.getValue());
         }
         unlockedTechnologies.add(technology);
-        stepsSoFar.add(new ResearchStep(technology, new ArrayList<>()));
+        stepsSoFar.add(new ResearchStep(technology, "lab", 1, new ArrayList<>()));
         return true;
     }
 
@@ -415,6 +421,8 @@ public class Main {
                 int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
                 moduleSlots.put(name, slotCount);
             }
+
+            powerUsages.put(name, stringToPower((String)entry.getValue().get("energy_usage")));
         }
     }
 
@@ -440,6 +448,42 @@ public class Main {
         }
     }
 
+    private static double stringPlusPrefixToDouble(String string) {
+        char c = string.charAt(string.length() - 1);
+        if (Character.isDigit(c)) {
+            return Double.parseDouble(string);
+        }
+        double base = Double.parseDouble(string.substring(0, string.length() - 1));
+        double multiplier = 0.0;
+        switch (c) {
+            case 'M':
+            multiplier = 1000000.0;
+            break;
+            case 'k':
+            multiplier = 1000.0;
+            break;
+            default:
+            System.err.println("Unhandled prefix " + c);
+            break;
+        }
+        return base * multiplier;
+    }
+
+    private static double stringToEnergy(String string) {
+        if (!string.endsWith("J")) {
+            System.err.println("Bad energy value!");
+            return 0.0;
+        }
+        return stringPlusPrefixToDouble(string.substring(0, string.length() - 1));
+    }
+
+    private static double stringToPower(String string) {
+        if (!string.endsWith("W")) {
+            System.err.println("Bad energy value!");
+            return 0.0;
+        }
+        return stringPlusPrefixToDouble(string.substring(0, string.length() - 1));
+    }
 
     @SuppressWarnings("unchecked")
     private static void ParseItems(Map<String, Map<String, Object>> itemMap) {
@@ -447,6 +491,11 @@ public class Main {
             String name = entry.getKey();
             String subgroup = (String) entry.getValue().get("subgroup");
             subgroups.put(name, subgroup);
+
+            String fuelValueString = (String) entry.getValue().get("fuel_value");
+            if (null != fuelValueString) {
+                fuels.put(name, stringToEnergy(fuelValueString));
+            }
         }
     }
 
@@ -463,7 +512,7 @@ public class Main {
             int unitCount = ((Number) unit.get("count")).intValue();
             double unitDuration = ((Number) unit.get("time")).doubleValue();
 
-            Technology technology = new Technology(name, unitCount, unitDuration);
+            Technology technology = new Technology(name, unitCount, Duration.ofMillis((long)(1000 * unitDuration)));
 
             technology.prerequisites.addAll(prerequisites);
 
@@ -528,7 +577,7 @@ public class Main {
                 craftingTime = 0.5;
             }
             String result = (String) entry.getValue().get("result");
-            Recipe recipe = new Recipe(name, category, craftingTime.doubleValue());
+            Recipe recipe = new Recipe(name, category, Duration.ofMillis((long)(1000 * craftingTime.doubleValue())));
             if (null != result) {
                 Number amount = (Number) entry.getValue().get("result_count");
                 if (null == amount) {
@@ -592,6 +641,8 @@ public class Main {
 
     @SuppressWarnings("unchecked")
     private static void ParseResources(Map<String, Object> playerMap, Map<String, Map<String, Object>> resourceMap, Map<String, Map<String, Object>> miningDrillMap) {
+        Map<Resource, Double> miningHardness = new TreeMap<>();
+        Map<Resource, Double> miningTime = new TreeMap<>();
         for (Map<String, Object> value : resourceMap.values()) {
             String category = (String) value.get("category");
             if (null == category) {
@@ -600,69 +651,84 @@ public class Main {
             Map<String, Object> minable = (Map<String, Object>) value.get("minable");
             String result = (String) minable.get("result");
             if (null != result) {
-                Resource resource = new Resource(result, category, ((Number) minable.get("mining_time")).doubleValue());
+                Resource resource = new Resource(result, category);
                 resources.put(result, resource);
+                miningHardness.put(resource, ((Number) minable.get("hardness")).doubleValue());
+                miningTime.put(resource, ((Number) minable.get("mining_time")).doubleValue());
             } else {
                 List<Map<String, Object>> results = (List<Map<String, Object>>) minable.get("results");
                 if (null != results) {
                     for (Map<String, Object> resultMap : results) {
                         result = (String) resultMap.get("name");
-                        Resource resource = new Resource(result, category, ((Number) minable.get("mining_time")).doubleValue());
+                        Resource resource = new Resource(result, category);
                         resources.put(result, resource);
+                        miningHardness.put(resource, ((Number) minable.get("hardness")).doubleValue());
+                        miningTime.put(resource, ((Number) minable.get("mining_time")).doubleValue());
                     }
                 }
             }
         }
 
-        Map<String, List<String>> miningCategories = new HashMap<>();
-        Map<String, Double> miningSpeeds = new HashMap<>();
+        Map<String, List<String>> miningCategories = new TreeMap<>();
+        Map<String, Double> miningSpeeds = new TreeMap<>();
+        Map<String, Double> miningPowers = new TreeMap<>();
         Object playerMiningCategories = playerMap.get("mining_categories");
         if (playerMiningCategories instanceof List) {
-            miningCategories.put((String) playerMap.get("name"), (List<String>) playerMiningCategories);
-            miningSpeeds.put((String) playerMap.get("name"), ((Number) playerMap.get("mining_speed")).doubleValue());
-
+            String name = (String) playerMap.get("name");
+            miningCategories.put(name, (List<String>) playerMiningCategories);
+            miningSpeeds.put(name, ((Number) playerMap.get("mining_speed")).doubleValue() * 60); // Apparently player mining speed is per tick!?
+            miningPowers.put(name, 1.0);
         }
         for (Map.Entry<String, Map<String, Object>> entry : miningDrillMap.entrySet()) {
+            String name = entry.getKey();
+
             Object drillResourceCategories = entry.getValue().get("resource_categories");
             if (drillResourceCategories instanceof List) {
-                miningCategories.put(entry.getKey(), (List<String>) drillResourceCategories);
+                miningCategories.put(name, (List<String>) drillResourceCategories);
             }
             Object drillMiningSpeed = entry.getValue().get("mining_speed");
             if (drillMiningSpeed instanceof Number) {
-                miningSpeeds.put(entry.getKey(), ((Number) drillMiningSpeed).doubleValue());
+                miningSpeeds.put(name, ((Number) drillMiningSpeed).doubleValue());
+            }
+            Object drillMiningPower = entry.getValue().get("mining_power");
+            if (drillMiningPower instanceof Number) {
+                miningPowers.put(name, ((Number) drillMiningPower).doubleValue());
             }
             Object drillModuleSpec = entry.getValue().get("module_specification");
             if (drillModuleSpec != null && drillModuleSpec instanceof Map) {
                 int slotCount = ((Map<String, Integer>)drillModuleSpec).get("module_slots");
-                moduleSlots.put(entry.getKey(), slotCount);
+                moduleSlots.put(name, slotCount);
             }
+
+            powerUsages.put(name, stringToPower((String)entry.getValue().get("energy_usage")));
         }
 
         for (Map.Entry<String, Double> entry : miningSpeeds.entrySet()) {
             String drillName = entry.getKey();
             double baseSpeed = entry.getValue();
+            double power = miningPowers.get(drillName);
             List<String> categories = miningCategories.get(drillName);
             for (Resource resource : resources.values()) {
                 if (!categories.contains(resource.category)) {
                     continue;
                 }
-                resource.miningTimes.put(drillName, resource.baseMiningTime / baseSpeed);
+                resource.miningTimes.put(drillName, Duration.ofMillis((long) (1000 * miningTime.get(resource) / ((power - miningHardness.get(resource)) * baseSpeed))));
             }
         }
 
         // Fake water to make everything else cleaner
-        Resource water = new Resource("water", "water", 1);
-        water.miningTimes.put("offshore-pump", 1.0);
+        Resource water = new Resource("water", "water");
+        water.miningTimes.put("offshore-pump", Duration.ofSeconds(1));
         resources.put("water", water);
 
         // Fake wood too
-        Resource wood = new Resource("raw-wood", "trees", 2);
-        wood.miningTimes.put("player", 2.0);
+        Resource wood = new Resource("raw-wood", "trees");
+        wood.miningTimes.put("player", Duration.ofSeconds(2));
         resources.put("raw-wood", wood);
 
         // And alien artifacts
-        Resource artifact = new Resource("alien-artifact", "artifacts", 0);
-        artifact.miningTimes.put("player", 0.0);
+        Resource artifact = new Resource("alien-artifact", "artifacts");
+        artifact.miningTimes.put("player", Duration.ofSeconds(0));
         resources.put("alien-artifact", artifact);
     }
 
@@ -687,6 +753,8 @@ public class Main {
                 int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
                 moduleSlots.put(name, slotCount);
             }
+
+            powerUsages.put(name, stringToPower((String)entry.getValue().get("energy_usage")));
         }
 
         for (Map.Entry<String, Map<String, Object>> entry : furnaceMap.entrySet()) {
@@ -702,6 +770,8 @@ public class Main {
                 int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
                 moduleSlots.put(name, slotCount);
             }
+
+            powerUsages.put(name, stringToPower((String)entry.getValue().get("energy_usage")));
         }
 
         for (Map.Entry<String, Map<String, Object>> entry : rocketSiloMap.entrySet()) {
@@ -717,6 +787,8 @@ public class Main {
                 int slotCount = ((Map<String, Integer>)moduleSpec).get("module_slots");
                 moduleSlots.put(name, slotCount);
             }
+
+            powerUsages.put(name, stringToPower((String)entry.getValue().get("energy_usage")));
         }
     }
 
@@ -838,25 +910,39 @@ public class Main {
     }
 
     public static abstract class Step extends NamedThing {
-        List<String> modules = null;
+        int parallelism;
+        List<String> modules;
 
-        protected Step(String name, List<String> modules) {
+        protected Step(String name, int parallelism, List<String> modules) {
             super(name);
+            this.parallelism = parallelism;
             this.modules = modules;
         }
 
         public abstract String toString();
+
+        public Duration getDuration() {
+            return getBaseDuration().dividedBy(parallelism);
+        }
+
+        protected abstract Duration getBaseDuration();
     }
 
     public static class ResearchStep extends Step {
         Technology technology = null;
+        String researcher = null;
 
-        public ResearchStep(Technology technology, List<String> modules) {
-            super(technology.name, modules);
+        public ResearchStep(Technology technology, String researcher, int parallelism, List<String> modules) {
+            super(technology.name, parallelism, modules);
             this.technology = technology;
+            this.researcher = researcher;
         }
         public String toString() {
-            return "Research " + technology.name;
+            return "Research " + technology.name + " with " + parallelism + " " + researcher + (parallelism != 1 ? "s" : "");
+        }
+
+        protected Duration getBaseDuration() {
+            return technology.unitDuration.multipliedBy(technology.unitCount);
         }
     }
 
@@ -865,8 +951,8 @@ public class Main {
         int craftCount = 0;
         String crafter = null;
 
-        public CraftStep(Recipe recipe, int craftCount, String crafter, List<String> modules) {
-            super(recipe.name, modules);
+        public CraftStep(Recipe recipe, int craftCount, String crafter, int parallelism, List<String> modules) {
+            super(recipe.name, parallelism, modules);
             this.recipe = recipe;
             this.craftCount = craftCount;
             this.crafter = crafter;
@@ -884,7 +970,12 @@ public class Main {
                 result += entry.getValue() + " " + entry.getKey() + (entry.getValue().doubleValue() != 1.0 ? "s" : "");
             }
             result += ")";
-            return "Craft " + recipe.name + " " + result + " " + craftCount + " time" + (craftCount != 1 ? "s" : "") + " with " + crafter;
+            return "Craft " + recipe.name + " " + result + " " + craftCount + " time" + (craftCount != 1 ? "s" : "") + " with " + parallelism + " " + crafter + (parallelism != 1 ? "s" : "");
+        }
+
+        protected Duration getBaseDuration() {
+            // Wth can't a Duration be divided by a double!?
+            return Duration.ofMillis((long)(recipe.craftingTime.toMillis() * craftCount / crafters.get(crafter).craftingSpeed));
         }
     }
 
@@ -893,15 +984,19 @@ public class Main {
         double resourceCount = 0;
         String miner = null;
 
-        public MineStep(Resource resource, double resourceCount, String miner, List<String> modules) {
-            super(resource.name, modules);
+        public MineStep(Resource resource, double resourceCount, String miner, int parallelism, List<String> modules) {
+            super(resource.name, parallelism, modules);
             this.resource = resource;
             this.resourceCount = resourceCount;
             this.miner = miner;
         }
 
         public String toString() {
-            return "Mine or pump " + resourceCount + " " + resource.name + " with " + miner;
+            return "Mine or pump " + resourceCount + " " + resource.name + " with " + parallelism + " " + miner + (parallelism != 1 ? "s" : "");
+        }
+
+        protected Duration getBaseDuration() {
+            return Duration.ofMillis((long) (resource.miningTimes.get(miner).toMillis() * resourceCount));
         }
     }
 
@@ -925,13 +1020,11 @@ public class Main {
 
     public static class Resource extends NamedThing {
         public String category;
-        public double baseMiningTime;
-        public Map<String, Double> miningTimes;
+        public Map<String, Duration> miningTimes;
 
-        public Resource(String name, String category, double baseMiningTime) {
+        public Resource(String name, String category) {
             super(name);
             this.category = category;
-            this.baseMiningTime = baseMiningTime;
             miningTimes = new HashMap<>();
         }
     }
@@ -951,11 +1044,11 @@ public class Main {
 
     public static class Recipe extends NamedThing {
         public String category;
-        public double craftingTime;
+        public Duration craftingTime;
         public Map<String, Number> ingredients;
         public Map<String, Number> results;
 
-        public Recipe(String name, String category, double craftingTime) {
+        public Recipe(String name, String category, Duration craftingTime) {
             super(name);
             this.category = category;
             this.craftingTime = craftingTime;
@@ -966,13 +1059,13 @@ public class Main {
 
     public static class Technology extends NamedThing {
         public int unitCount;
-        public double unitDuration;
+        public Duration unitDuration;
         public Map<String, Number> unitIngredients;
         public Set<String> prerequisites;
         public Set<String> recipesUnlocked;
         public Map<String, Number> modifiers;
 
-        public Technology(String name, int unitCount, double unitDuration) {
+        public Technology(String name, int unitCount, Duration unitDuration) {
             super(name);
             this.unitCount = unitCount;
             this.unitDuration = unitDuration;
